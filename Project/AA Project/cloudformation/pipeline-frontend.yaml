@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Frontend CodePipeline for React App with CloudFront-Only S3 Bucket
+
+Parameters:
+  GitHubToken:
+    Type: String
+  GitHubOwner:
+    Type: String
+  GitHubRepo:
+    Type: String
+  GitHubBranch:
+    Type: String
+  WebsiteBucket:
+    Type: String
+  CloudFrontDistributionId:
+    Type: String
+
+Resources:
+  FrontendPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: frontend-codepipeline-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FrontendPipelineAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:*
+                  - s3:*
+                  - cloudfront:CreateInvalidation
+                Resource: "*"
+
+  FrontendBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: frontend-codebuild-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  FrontendCodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: frontend-build-project
+      ServiceRole: !GetAtt FrontendBuildRole.Arn
+      Source:
+        Type: GITHUB
+        Location: !Sub "https://github.com/${GitHubOwner}/${GitHubRepo}.git"
+        BuildSpec: buildspec-frontend.yml
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:6.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: WebsiteBucket
+            Value: !Ref WebsiteBucket
+          - Name: CloudFrontDistributionId
+            Value: !Ref CloudFrontDistributionId
+      Artifacts:
+        Type: NO_ARTIFACTS
+      TimeoutInMinutes: 10
+
+  FrontendPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt FrontendPipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Sub "codepipeline-artifacts-${AWS::AccountId}"
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHubSource
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: "1"
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubToken
+              RunOrder: 1
+
+        - Name: Build
+          Actions:
+            - Name: ReactBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              InputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                ProjectName: frontend-build-project
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+
+        - Name: Deploy
+          Actions:
+            - Name: DeployToS3
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: "1"
+              InputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                BucketName: !Ref WebsiteBucket
+                Extract: true
+              RunOrder: 1
